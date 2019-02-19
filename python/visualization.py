@@ -7,6 +7,27 @@ import config
 import microphone
 import dsp
 import led
+import colorsys
+
+#Globals for cycle mode
+start=0
+elapsed=0
+effectCount=0
+cycleEffectON = False
+
+
+#Buttom setup
+import RPi.GPIO as GPIO
+GPIO.setmode(GPIO.BCM) # Broadcom pin-numbering scheme
+GPIO.setup(config.BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP) # Button pin set as input w/ pull-up
+buttonCount = 0
+buttonFlag = True
+
+#Number of effects (scroll, energy, spec, cycle)
+NUM_EFFECTS = 4
+
+
+
 
 _time_prev = time.time() * 1000.0
 """The previous time that the frames_per_second() function was called"""
@@ -168,12 +189,16 @@ def visualize_spectrum(y):
     r = r_filt.update(y - common_mode.value)
     g = np.abs(diff)
     b = b_filt.update(np.copy(y))
+    '''r *= .5
+    g *= .5#amount of color 0-1
+    b *= .5'''
     # Mirror the color channels for symmetric output
     r = np.concatenate((r[::-1], r))
     g = np.concatenate((g[::-1], g))
     b = np.concatenate((b[::-1], b))
     output = np.array([r, g,b]) * 255
     return output
+
 
 
 fft_plot_filter = dsp.ExpFilter(np.tile(1e-1, config.N_FFT_BINS),
@@ -188,8 +213,20 @@ fft_window = np.hamming(int(config.MIC_RATE / config.FPS) * config.N_ROLLING_HIS
 prev_fps_update = time.time()
 
 
+cycleEffects = [visualize_scroll,visualize_spectrum,visualize_energy]
+def effectCycle():
+    """Change effect ever xx minuets (see config)"""
+    #print("cycle mode")
+    global effectCount
+    global visualization_effect
+    effectCount = effectCount+1
+    if effectCount >= len(cycleEffects):
+        effectCount=0
+    visualization_effect = cycleEffects[effectCount]
+    
+
 def microphone_update(audio_samples):
-    global y_roll, prev_rms, prev_exp, prev_fps_update
+    global y_roll, prev_rms, prev_exp, prev_fps_update, elapsed, start, cycleEffectON
     # Normalize samples between 0 and 1
     y = audio_samples / 2.0**15
     # Construct a rolling window of audio samples
@@ -224,17 +261,19 @@ def microphone_update(audio_samples):
         output = visualization_effect(mel)
         led.pixels = output
         led.update()
-        if config.USE_GUI:
-            # Plot filterbank output
-            x = np.linspace(config.MIN_FREQUENCY, config.MAX_FREQUENCY, len(mel))
-            mel_curve.setData(x=x, y=fft_plot_filter.update(mel))
-            # Plot the color channels
-            r_curve.setData(y=led.pixels[0])
-            g_curve.setData(y=led.pixels[1])
-            b_curve.setData(y=led.pixels[2])
-    if config.USE_GUI:
-        app.processEvents()
-    
+
+    #check button state
+    checkButton()
+
+    #cycle effect if on
+    if cycleEffectON:
+        elapsed = time.time() - start
+        if elapsed >= config.CYCLE_TIME:
+            #print("change effect")
+            effectCycle()
+            start = time.time()
+            
+    #display fps if on
     if config.DISPLAY_FPS:
         fps = frames_per_second()
         if time.time() - 0.5 > prev_fps_update:
@@ -252,104 +291,53 @@ visualization_effect = visualize_spectrum
 """Visualization effect to display on the LED strip"""
 
 
+
+def changeEffect(i):
+    global visualization_effect
+    global cycleEffectON
+    cycleEffectON = False
+        
+    if buttonCount == 0:
+        visualization_effect = visualize_energy
+        print("Effect Changes -- Energy")
+    if buttonCount == 1:
+        visualization_effect = visualize_scroll
+        print("Effect Changes -- Scroll")
+    if buttonCount == 2:
+        visualization_effect = visualize_spectrum
+        print("Effect Changes -- Spectrum")
+    if buttonCount == 3:
+        print("Effect Changes -- Cycle")
+        start=time.time()
+        cycleEffectON = True
+        
+
+        
+
+def checkButton():
+    global buttonCount
+    global buttonFlag
+    if GPIO.input(config.BUTTON_PIN): # button is released
+        buttonFlag = True
+    else: #button pressed
+        if buttonFlag:
+            changeEffect(buttonCount)
+            buttonCount = buttonCount +1
+            buttonFlag=False
+            if buttonCount >= NUM_EFFECTS: 
+                buttonCount = 0
+
+
+
+
+
+        
 if __name__ == '__main__':
-    if config.USE_GUI:
-        import pyqtgraph as pg
-        from pyqtgraph.Qt import QtGui, QtCore
-        # Create GUI window
-        app = QtGui.QApplication([])
-        view = pg.GraphicsView()
-        layout = pg.GraphicsLayout(border=(100,100,100))
-        view.setCentralItem(layout)
-        view.show()
-        view.setWindowTitle('Visualization')
-        view.resize(800,600)
-        # Mel filterbank plot
-        fft_plot = layout.addPlot(title='Filterbank Output', colspan=3)
-        fft_plot.setRange(yRange=[-0.1, 1.2])
-        fft_plot.disableAutoRange(axis=pg.ViewBox.YAxis)
-        x_data = np.array(range(1, config.N_FFT_BINS + 1))
-        mel_curve = pg.PlotCurveItem()
-        mel_curve.setData(x=x_data, y=x_data*0)
-        fft_plot.addItem(mel_curve)
-        # Visualization plot
-        layout.nextRow()
-        led_plot = layout.addPlot(title='Visualization Output', colspan=3)
-        led_plot.setRange(yRange=[-5, 260])
-        led_plot.disableAutoRange(axis=pg.ViewBox.YAxis)
-        # Pen for each of the color channel curves
-        r_pen = pg.mkPen((255, 30, 30, 200), width=4)
-        g_pen = pg.mkPen((30, 255, 30, 200), width=4)
-        b_pen = pg.mkPen((30, 30, 255, 200), width=4)
-        # Color channel curves
-        r_curve = pg.PlotCurveItem(pen=r_pen)
-        g_curve = pg.PlotCurveItem(pen=g_pen)
-        b_curve = pg.PlotCurveItem(pen=b_pen)
-        # Define x data
-        x_data = np.array(range(1, config.N_PIXELS + 1))
-        r_curve.setData(x=x_data, y=x_data*0)
-        g_curve.setData(x=x_data, y=x_data*0)
-        b_curve.setData(x=x_data, y=x_data*0)
-        # Add curves to plot
-        led_plot.addItem(r_curve)
-        led_plot.addItem(g_curve)
-        led_plot.addItem(b_curve)
-        # Frequency range label
-        freq_label = pg.LabelItem('')
-        # Frequency slider
-        def freq_slider_change(tick):
-            minf = freq_slider.tickValue(0)**2.0 * (config.MIC_RATE / 2.0)
-            maxf = freq_slider.tickValue(1)**2.0 * (config.MIC_RATE / 2.0)
-            t = 'Frequency range: {:.0f} - {:.0f} Hz'.format(minf, maxf)
-            freq_label.setText(t)
-            config.MIN_FREQUENCY = minf
-            config.MAX_FREQUENCY = maxf
-            dsp.create_mel_bank()
-        freq_slider = pg.TickSliderItem(orientation='bottom', allowAdd=False)
-        freq_slider.addTick((config.MIN_FREQUENCY / (config.MIC_RATE / 2.0))**0.5)
-        freq_slider.addTick((config.MAX_FREQUENCY / (config.MIC_RATE / 2.0))**0.5)
-        freq_slider.tickMoveFinished = freq_slider_change
-        freq_label.setText('Frequency range: {} - {} Hz'.format(
-            config.MIN_FREQUENCY,
-            config.MAX_FREQUENCY))
-        # Effect selection
-        active_color = '#16dbeb'
-        inactive_color = '#FFFFFF'
-        def energy_click(x):
-            global visualization_effect
-            visualization_effect = visualize_energy
-            energy_label.setText('Energy', color=active_color)
-            scroll_label.setText('Scroll', color=inactive_color)
-            spectrum_label.setText('Spectrum', color=inactive_color)
-        def scroll_click(x):
-            global visualization_effect
-            visualization_effect = visualize_scroll
-            energy_label.setText('Energy', color=inactive_color)
-            scroll_label.setText('Scroll', color=active_color)
-            spectrum_label.setText('Spectrum', color=inactive_color)
-        def spectrum_click(x):
-            global visualization_effect
-            visualization_effect = visualize_spectrum
-            energy_label.setText('Energy', color=inactive_color)
-            scroll_label.setText('Scroll', color=inactive_color)
-            spectrum_label.setText('Spectrum', color=active_color)
-        # Create effect "buttons" (labels with click event)
-        energy_label = pg.LabelItem('Energy')
-        scroll_label = pg.LabelItem('Scroll')
-        spectrum_label = pg.LabelItem('Spectrum')
-        energy_label.mousePressEvent = energy_click
-        scroll_label.mousePressEvent = scroll_click
-        spectrum_label.mousePressEvent = spectrum_click
-        energy_click(0)
-        # Layout
-        layout.nextRow()
-        layout.addItem(freq_label, colspan=3)
-        layout.nextRow()
-        layout.addItem(freq_slider, colspan=3)
-        layout.nextRow()
-        layout.addItem(energy_label)
-        layout.addItem(scroll_label)
-        layout.addItem(spectrum_label)
+    
+
+    print("in main loop")
+        
+        
     # Initialize LEDs
     led.update()
     # Start listening to live audio stream
